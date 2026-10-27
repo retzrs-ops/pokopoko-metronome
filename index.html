@@ -324,15 +324,40 @@ sanitize();
 
 /* ---------- audio ---------- */
 let ctx, master, noiseBuf;
+/* iOS: 消音スイッチ越しに鳴らすため、無音の <audio> を再生してオーディオセッションを "playback" にする */
+let keepAlive;
+function unlockIOS() {
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+  try {
+    if (!keepAlive) {
+      const n = 8000, h = new DataView(new ArrayBuffer(44 + n));
+      const w = (o, str) => [...str].forEach((c, i) => h.setUint8(o + i, c.charCodeAt(0)));
+      w(0, 'RIFF'); h.setUint32(4, 36 + n, true); w(8, 'WAVEfmt '); h.setUint32(16, 16, true);
+      h.setUint16(20, 1, true); h.setUint16(22, 1, true); h.setUint32(24, 8000, true);
+      h.setUint32(28, 8000, true); h.setUint16(32, 1, true); h.setUint16(34, 8, true);
+      w(36, 'data'); h.setUint32(40, n, true);
+      for (let i = 0; i < n; i++) h.setUint8(44 + i, 128);
+      let bin = ''; new Uint8Array(h.buffer).forEach(b => bin += String.fromCharCode(b));
+      keepAlive = new Audio('data:audio/wav;base64,' + btoa(bin));
+      keepAlive.loop = true; keepAlive.setAttribute('playsinline', '');
+    }
+    keepAlive.play().catch(() => {});
+  } catch (e) {}
+}
 function ensureCtx() {
+  unlockIOS();
   if (!ctx) {
-    ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
     master = ctx.createGain(); master.gain.value = 1; master.connect(ctx.destination);
     noiseBuf = ctx.createBuffer(1, ctx.sampleRate * .1, ctx.sampleRate);
     const d = noiseBuf.getChannelData(0);
     for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    ctx.onstatechange = () => { if (running && ctx.state !== 'running') ctx.resume(); };
   }
-  if (ctx.state === 'suspended') ctx.resume();
+  if (ctx.state !== 'running') ctx.resume();
+  // 再生許可を確実に得るため、ジェスチャー内で無音バッファを一度鳴らす
+  const b = ctx.createBuffer(1, 1, 22050), src = ctx.createBufferSource();
+  src.buffer = b; src.connect(ctx.destination); src.start(0);
 }
 function voice(t, lvl) {
   const s = SOUNDS[S.sound];
@@ -384,6 +409,7 @@ function pump() { while (nextTime < ctx.currentTime + .12) scheduleTick(); }
 
 async function start() {
   ensureCtx();
+  await Promise.race([ctx.resume(), new Promise(r => setTimeout(r, 400))]);
   running = true; beat = 0; subi = 0; bars = 0; beatCount = 0; queue = []; anchor = null;
   nextTime = ctx.currentTime + .08; startedAt = performance.now();
   timerId = setInterval(pump, 25); pump();
@@ -399,6 +425,7 @@ function stop() {
   document.querySelectorAll('.dot.now').forEach(d => d.classList.remove('now'));
   try { if (wakeLock) wakeLock.release(); } catch (e) {}
   wakeLock = null;
+  if (keepAlive) keepAlive.pause();
   renderPlay();
 }
 const toggle = () => running ? stop() : start();
